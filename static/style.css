@@ -88,6 +88,7 @@ h1 { font-size: 1.2rem; font-weight: 600; }
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 1rem;
+  align-items: start;
 }
 
 .sys-card {
@@ -121,6 +122,57 @@ h1 { font-size: 1.2rem; font-weight: 600; }
   height: 52px;
   border-radius: 4px;
   margin-bottom: 0.6rem;
+}
+
+/* ---- Per-core grid ---- */
+
+.cores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 4px 8px;
+  margin-top: 0.75rem;
+  text-align: left;
+}
+
+.core-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.core-label {
+  font-size: 0.6rem;
+  color: var(--muted);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  width: 18px;
+  flex-shrink: 0;
+}
+
+.core-track {
+  flex: 1;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.core-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s ease;
+}
+
+.core-fill.ok   { background: var(--green); }
+.core-fill.warn { background: var(--yellow); }
+.core-fill.crit { background: var(--red); }
+
+.core-pct {
+  font-size: 0.6rem;
+  color: var(--muted);
+  width: 26px;
+  text-align: right;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 
 .sys-sub {

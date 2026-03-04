@@ -30,7 +30,8 @@
 
 /**
  * @typedef {Object} SystemInfo
- * @property {number}   cpuPct - CPU usage percentage (0-100)
+ * @property {number}   cpuPct - Overall CPU usage percentage (0-100)
+ * @property {number[]} cores  - Per-core usage percentages (0-100)
  * @property {MemInfo}  memory - Memory info
  * @property {SwapInfo} swap   - Swap info
  */
@@ -153,8 +154,46 @@ const drawGraph = (canvas, data, level) => {
 // ---- System cards ----
 
 /**
+ * Build the compact per-core usage grid HTML.
+ * @param {number[]} cores - Per-core usage percentages (0-100).
+ * @returns {string}
+ */
+const renderCores = (cores) => {
+  if (!cores || cores.length === 0) return '';
+  const items = cores.map((pct, i) => {
+    const c = lvl(pct);
+    return (
+      `<div class="core-item">` +
+        `<span class="core-label">C${i}</span>` +
+        `<div class="core-track"><div class="core-fill ${c}" style="width:${Math.min(pct, 100).toFixed(1)}%"></div></div>` +
+        `<span class="core-pct">${pct.toFixed(0)}%</span>` +
+      `</div>`
+    );
+  }).join('');
+  return `<div class="cores-grid">${items}</div>`;
+};
+
+/**
+ * Build the CPU card: overall %, graph canvas, and per-core grid.
+ * @param {number}   pct   - Overall CPU usage percentage (0-100).
+ * @param {number[]} cores - Per-core usage percentages (0-100).
+ * @returns {string}
+ */
+const cpuCard = (pct, cores) => {
+  const c = lvl(pct);
+  return (
+    `<div class="card sys-card">` +
+      `<div class="sys-label">CPU</div>` +
+      `<div class="sys-pct ${c}">${pct.toFixed(1)}%</div>` +
+      `<canvas id="graph-cpu" class="sys-graph"></canvas>` +
+      renderCores(cores) +
+    `</div>`
+  );
+};
+
+/**
  * Build an HTML string for a system stat card with an embedded graph canvas.
- * @param {string} id      - Unique canvas ID suffix (e.g. 'cpu', 'mem').
+ * @param {string} id      - Unique canvas ID suffix (e.g. 'mem', 'swap').
  * @param {string} title   - Card title.
  * @param {number} pct     - Current usage percentage (0-100).
  * @param {string} subline - Secondary info line (e.g. "used / total").
@@ -182,7 +221,7 @@ const renderSystem = (data) => {
   pushHistory(memHistory,  data.memory.usedPct);
   pushHistory(swapHistory, data.swap.usedPct);
 
-  let html = sysCard('cpu', 'CPU', data.cpuPct, '&nbsp;');
+  let html = cpuCard(data.cpuPct, data.cores);
   html += sysCard('mem', 'Memory', data.memory.usedPct,
     `${fmt(data.memory.used)} / ${fmt(data.memory.total)}`);
   if (data.swap.total > 0) {

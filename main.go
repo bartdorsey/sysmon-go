@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"embed"
 	"encoding/json"
-	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -163,50 +162,55 @@ type cpuStat struct {
 
 var (
 	prevCPU   cpuStat
+	prevCores []cpuStat
 	prevCPUMu sync.Mutex
 )
 
-func readCPUStat() (cpuStat, error) {
+// parseCPUStat extracts total and idle ticks from a /proc/stat cpu* field slice.
+func parseCPUStat(fields []string) cpuStat {
+	// fields[0] is the cpu label; fields[1..] are:
+	// user nice system idle iowait irq softirq steal guest guest_nice
+	var v [10]uint64
+	for i := 1; i < len(fields) && i-1 < len(v); i++ {
+		v[i-1], _ = strconv.ParseUint(fields[i], 10, 64)
+	}
+	total := v[0] + v[1] + v[2] + v[3] + v[4] + v[5] + v[6] + v[7]
+	idle := v[3] + v[4] // idle + iowait
+	return cpuStat{total: total, idle: idle}
+}
+
+// readCPUStats reads /proc/stat and returns the aggregate CPU stat plus one
+// entry per logical core (cpu0, cpu1, …).
+func readCPUStats() (agg cpuStat, cores []cpuStat, err error) {
 	f, err := os.Open(procPath("stat"))
 	if err != nil {
-		return cpuStat{}, err
+		return
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "cpu ") {
+		if !strings.HasPrefix(line, "cpu") {
 			continue
 		}
 		fields := strings.Fields(line)
-		// cpu user nice system idle iowait irq softirq steal guest guest_nice
 		if len(fields) < 5 {
-			break
+			continue
 		}
-		var v [10]uint64
-		for i := 1; i < len(fields) && i-1 < len(v); i++ {
-			v[i-1], _ = strconv.ParseUint(fields[i], 10, 64)
+		s := parseCPUStat(fields)
+		if fields[0] == "cpu" {
+			agg = s
+		} else {
+			cores = append(cores, s)
 		}
-		total := v[0] + v[1] + v[2] + v[3] + v[4] + v[5] + v[6] + v[7]
-		idle := v[3] + v[4] // idle + iowait
-		return cpuStat{total: total, idle: idle}, nil
 	}
-	return cpuStat{}, fmt.Errorf("cpu line not found in /proc/stat")
+	err = scanner.Err()
+	return
 }
 
-func getCPUPct() float64 {
-	cur, err := readCPUStat()
-	if err != nil {
-		log.Printf("cpu: %v", err)
-		return 0
-	}
-
-	prevCPUMu.Lock()
-	prev := prevCPU
-	prevCPU = cur
-	prevCPUMu.Unlock()
-
+// diffPct computes the usage percentage between two consecutive cpu readings.
+func diffPct(cur, prev cpuStat) float64 {
 	dTotal := cur.total - prev.total
 	dIdle := cur.idle - prev.idle
 	if dTotal == 0 {
@@ -214,9 +218,34 @@ func getCPUPct() float64 {
 	}
 	pct := float64(dTotal-dIdle) / float64(dTotal) * 100
 	if pct < 0 {
-		pct = 0
+		return 0
 	}
 	return pct
+}
+
+// getCPUPcts returns the aggregate CPU percentage and a per-core slice.
+func getCPUPcts() (float64, []float64) {
+	curAgg, curCores, err := readCPUStats()
+	if err != nil {
+		log.Printf("cpu: %v", err)
+		return 0, nil
+	}
+
+	prevCPUMu.Lock()
+	prevAgg := prevCPU
+	prevCoresCopy := make([]cpuStat, len(prevCores))
+	copy(prevCoresCopy, prevCores)
+	prevCPU = curAgg
+	prevCores = curCores
+	prevCPUMu.Unlock()
+
+	corePcts := make([]float64, len(curCores))
+	for i, cur := range curCores {
+		if i < len(prevCoresCopy) {
+			corePcts[i] = diffPct(cur, prevCoresCopy[i])
+		}
+	}
+	return diffPct(curAgg, prevAgg), corePcts
 }
 
 // ---------- Memory ----------
@@ -237,9 +266,10 @@ type SwapInfo struct {
 }
 
 type SystemInfo struct {
-	CPUPct float64  `json:"cpuPct"`
-	Memory MemInfo  `json:"memory"`
-	Swap   SwapInfo `json:"swap"`
+	CPUPct float64   `json:"cpuPct"`
+	Cores  []float64 `json:"cores"`
+	Memory MemInfo   `json:"memory"`
+	Swap   SwapInfo  `json:"swap"`
 }
 
 func getSystemInfo() (SystemInfo, error) {
@@ -280,8 +310,10 @@ func getSystemInfo() (SystemInfo, error) {
 		swapPct = float64(swapUsed) / float64(swapTotal) * 100
 	}
 
+	aggPct, corePcts := getCPUPcts()
 	return SystemInfo{
-		CPUPct: getCPUPct(),
+		CPUPct: aggPct,
+		Cores:  corePcts,
 		Memory: MemInfo{
 			Total:     memTotal,
 			Used:      memUsed,
@@ -302,9 +334,10 @@ func getSystemInfo() (SystemInfo, error) {
 
 func main() {
 	// Prime the CPU counter so the first API call returns a real delta.
-	if s, err := readCPUStat(); err == nil {
+	if agg, cores, err := readCPUStats(); err == nil {
 		prevCPUMu.Lock()
-		prevCPU = s
+		prevCPU = agg
+		prevCores = cores
 		prevCPUMu.Unlock()
 	}
 
