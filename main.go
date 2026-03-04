@@ -3,15 +3,19 @@ package main
 import (
 	"bufio"
 	"embed"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 //go:embed static
@@ -330,6 +334,280 @@ func getSystemInfo() (SystemInfo, error) {
 	}, nil
 }
 
+// ---------- Hardware ----------
+
+// HardwareInfo holds static CPU and RAM details, read once at startup.
+type HardwareInfo struct {
+	CPUModel string `json:"cpuModel"` // e.g. "Intel(R) Core(TM) i9-13900K CPU @ 3.00GHz"
+	RAMType  string `json:"ramType"`  // e.g. "DDR4"
+	RAMSpeed string `json:"ramSpeed"` // e.g. "3200 MT/s"
+}
+
+var (
+	hwOnce  sync.Once
+	hwCache HardwareInfo
+)
+
+func getCPUModel() string {
+	f, err := os.Open(procPath("cpuinfo"))
+	if err != nil {
+		return "Unknown"
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "model name") {
+			if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return "Unknown"
+}
+
+// smbiosMemType maps SMBIOS Type 17 memory-type byte to a name.
+func smbiosMemType(t byte) string {
+	switch t {
+	case 0x12:
+		return "DDR"
+	case 0x13:
+		return "DDR2"
+	case 0x18:
+		return "DDR3"
+	case 0x1A:
+		return "DDR4"
+	case 0x1B:
+		return "LPDDR"
+	case 0x1C:
+		return "LPDDR2"
+	case 0x1D:
+		return "LPDDR3"
+	case 0x1E:
+		return "LPDDR4"
+	case 0x22:
+		return "DDR5"
+	case 0x23:
+		return "LPDDR5"
+	default:
+		return ""
+	}
+}
+
+// getRAMDetails parses SMBIOS Type 17 (Memory Device) records from the DMI
+// table and returns the type and speed of the first populated slot found.
+func getRAMDetails() (ramType, ramSpeed string) {
+	var data []byte
+	for _, p := range []string{"/sys/firmware/dmi/tables/DMITable", "/host/sys/firmware/dmi/tables/DMITable"} {
+		if b, err := os.ReadFile(p); err == nil && len(b) > 0 {
+			data = b
+			break
+		}
+	}
+	if data == nil {
+		return "Unknown", ""
+	}
+
+	i := 0
+	for i < len(data) {
+		if i+4 > len(data) {
+			break
+		}
+		sType := data[i]
+		sLen := int(data[i+1])
+		if sLen < 4 || i+sLen > len(data) {
+			break
+		}
+
+		// Skip past the strings section to locate the next structure.
+		next := i + sLen
+		for next+1 < len(data) {
+			if data[next] == 0 && data[next+1] == 0 {
+				next += 2
+				break
+			}
+			next++
+		}
+
+		if sType == 17 && sLen >= 0x17 {
+			// Offset 0x0C: size in MB (0 = not installed).
+			sz := binary.LittleEndian.Uint16(data[i+0x0C:])
+			if sz == 0 {
+				i = next
+				continue
+			}
+			mt := smbiosMemType(data[i+0x12])
+			if mt != "" {
+				ramType = mt
+				// Offset 0x15: speed in MT/s.
+				speed := binary.LittleEndian.Uint16(data[i+0x15:])
+				// Offset 0x20: configured speed (prefer if available).
+				if sLen >= 0x23 && i+0x22 <= len(data) {
+					if cs := binary.LittleEndian.Uint16(data[i+0x20:]); cs > 0 {
+						speed = cs
+					}
+				}
+				if speed > 0 {
+					ramSpeed = fmt.Sprintf("%d MT/s", speed)
+				}
+				return ramType, ramSpeed
+			}
+		}
+		i = next
+	}
+	if ramType == "" {
+		ramType = "Unknown"
+	}
+	return ramType, ramSpeed
+}
+
+func getHardwareInfo() HardwareInfo {
+	hwOnce.Do(func() {
+		ramType, ramSpeed := getRAMDetails()
+		hwCache = HardwareInfo{
+			CPUModel: getCPUModel(),
+			RAMType:  ramType,
+			RAMSpeed: ramSpeed,
+		}
+	})
+	return hwCache
+}
+
+// ---------- Processes ----------
+
+const clockTicksPerSec = 100 // Linux USER_HZ
+
+// ProcInfo holds per-process CPU and memory stats.
+type ProcInfo struct {
+	PID      int     `json:"pid"`
+	Name     string  `json:"name"`
+	CPUPct   float64 `json:"cpuPct"`
+	MemBytes uint64  `json:"memBytes"`
+}
+
+// ProcessesResponse carries two pre-sorted lists for the two UI views.
+type ProcessesResponse struct {
+	ByCPU []ProcInfo `json:"byCPU"`
+	ByMem []ProcInfo `json:"byMem"`
+}
+
+type procSnapshot struct {
+	ticks uint64
+	at    time.Time
+}
+
+var (
+	prevProcSnaps map[int]procSnapshot
+	prevProcMu    sync.Mutex
+)
+
+// procBaseDir returns the /proc directory, preferring the host bind-mount.
+func procBaseDir() string {
+	if _, err := os.Stat("/host/proc/1"); err == nil {
+		return "/host/proc"
+	}
+	return "/proc"
+}
+
+// readProcStat returns the process name and total CPU ticks (utime+stime).
+func readProcStat(base string, pid int) (name string, ticks uint64, err error) {
+	data, err := os.ReadFile(fmt.Sprintf("%s/%d/stat", base, pid))
+	if err != nil {
+		return "", 0, err
+	}
+	s := string(data)
+	start := strings.Index(s, "(")
+	end := strings.LastIndex(s, ")")
+	if start < 0 || end < 0 {
+		return "", 0, fmt.Errorf("bad stat format")
+	}
+	name = s[start+1 : end]
+	rest := strings.Fields(s[end+2:])
+	// After state: index 11=utime, 12=stime (0-based from rest[0]=state)
+	if len(rest) < 13 {
+		return name, 0, nil
+	}
+	utime, _ := strconv.ParseUint(rest[11], 10, 64)
+	stime, _ := strconv.ParseUint(rest[12], 10, 64)
+	return name, utime + stime, nil
+}
+
+// readProcMem returns VmRSS in bytes from /proc/[pid]/status.
+func readProcMem(base string, pid int) uint64 {
+	f, err := os.Open(fmt.Sprintf("%s/%d/status", base, pid))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 && fields[0] == "VmRSS:" {
+			v, _ := strconv.ParseUint(fields[1], 10, 64)
+			return v * 1024
+		}
+	}
+	return 0
+}
+
+func getProcesses() (ProcessesResponse, error) {
+	base := procBaseDir()
+	now := time.Now()
+
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return ProcessesResponse{}, err
+	}
+
+	prevProcMu.Lock()
+	oldSnaps := prevProcSnaps
+	newSnaps := make(map[int]procSnapshot, len(entries))
+	prevProcMu.Unlock()
+
+	var all []ProcInfo
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		name, ticks, err := readProcStat(base, pid)
+		if err != nil {
+			continue
+		}
+		mem := readProcMem(base, pid)
+		newSnaps[pid] = procSnapshot{ticks: ticks, at: now}
+
+		var cpuPct float64
+		if old, ok := oldSnaps[pid]; ok {
+			if dt := now.Sub(old.at).Seconds(); dt > 0 && ticks >= old.ticks {
+				cpuPct = float64(ticks-old.ticks) / (dt * clockTicksPerSec) * 100
+			}
+		}
+		all = append(all, ProcInfo{PID: pid, Name: name, CPUPct: cpuPct, MemBytes: mem})
+	}
+
+	prevProcMu.Lock()
+	prevProcSnaps = newSnaps
+	prevProcMu.Unlock()
+
+	const topN = 5
+	byCPU := make([]ProcInfo, len(all))
+	copy(byCPU, all)
+	sort.Slice(byCPU, func(i, j int) bool { return byCPU[i].CPUPct > byCPU[j].CPUPct })
+	if len(byCPU) > topN {
+		byCPU = byCPU[:topN]
+	}
+
+	byMem := make([]ProcInfo, len(all))
+	copy(byMem, all)
+	sort.Slice(byMem, func(i, j int) bool { return byMem[i].MemBytes > byMem[j].MemBytes })
+	if len(byMem) > topN {
+		byMem = byMem[:topN]
+	}
+
+	return ProcessesResponse{ByCPU: byCPU, ByMem: byMem}, nil
+}
+
 // ---------- Main ----------
 
 func main() {
@@ -340,6 +618,12 @@ func main() {
 		prevCores = cores
 		prevCPUMu.Unlock()
 	}
+
+	// Prime the process snapshots.
+	prevProcMu.Lock()
+	prevProcSnaps = make(map[int]procSnapshot)
+	prevProcMu.Unlock()
+	getProcesses() //nolint — discard first sample, used only to populate snapshots
 
 	sub, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -365,6 +649,17 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache")
 		info, err := getSystemInfo()
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(info)
+	})
+
+	http.HandleFunc("/api/processes", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
+		info, err := getProcesses()
 		if err != nil {
 			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 			return

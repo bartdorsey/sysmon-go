@@ -36,6 +36,20 @@
  * @property {SwapInfo} swap   - Swap info
  */
 
+/**
+ * @typedef {Object} ProcInfo
+ * @property {number} pid
+ * @property {string} name
+ * @property {number} cpuPct
+ * @property {number} memBytes
+ */
+
+/**
+ * @typedef {Object} ProcessesResponse
+ * @property {ProcInfo[]} byCPU
+ * @property {ProcInfo[]} byMem
+ */
+
 // ---- History buffers ----
 
 /** Maximum number of data points retained per metric. */
@@ -282,6 +296,64 @@ const card = (fs) => {
   );
 };
 
+// ---- Process panel ----
+
+/** @type {'cpu'|'mem'} */
+let procMode = 'cpu';
+
+/** @type {ProcessesResponse|null} */
+let lastProcData = null;
+
+/**
+ * Render the process panel into #proc-card.
+ * @param {ProcessesResponse} data
+ */
+const renderProcs = (data) => {
+  lastProcData = data;
+  const container = document.getElementById('proc-card');
+  if (!container) return;
+
+  const procs = procMode === 'cpu' ? data.byCPU : data.byMem;
+  const topVal = procs.length
+    ? (procMode === 'cpu' ? procs[0].cpuPct : procs[0].memBytes)
+    : 1;
+
+  const rows = procs.map((p) => {
+    const raw  = procMode === 'cpu' ? p.cpuPct : p.memBytes;
+    const bar  = topVal > 0 ? (raw / topVal) * 100 : 0;
+    const disp = procMode === 'cpu' ? `${p.cpuPct.toFixed(1)}%` : fmt(p.memBytes);
+    const c    = procMode === 'cpu' ? lvl(p.cpuPct) : 'ok';
+    return (
+      `<div class="proc-row">` +
+        `<span class="proc-name">${p.name}</span>` +
+        `<div class="proc-track"><div class="proc-fill ${c}" style="width:${bar.toFixed(1)}%"></div></div>` +
+        `<span class="proc-val">${disp}</span>` +
+      `</div>`
+    );
+  }).join('');
+
+  container.innerHTML =
+    `<div class="card" style="height:100%;box-sizing:border-box">` +
+      `<div class="proc-header">` +
+        `<span class="proc-title">Processes</span>` +
+        `<div class="proc-toggle">` +
+          `<button class="tog${procMode === 'cpu' ? ' tog-active' : ''}" id="tog-cpu">CPU</button>` +
+          `<button class="tog${procMode === 'mem' ? ' tog-active' : ''}" id="tog-mem">MEM</button>` +
+        `</div>` +
+      `</div>` +
+      `<div class="proc-list">${rows}</div>` +
+    `</div>`;
+
+  document.getElementById('tog-cpu')?.addEventListener('click', () => {
+    procMode = 'cpu';
+    if (lastProcData) renderProcs(lastProcData);
+  });
+  document.getElementById('tog-mem')?.addEventListener('click', () => {
+    procMode = 'mem';
+    if (lastProcData) renderProcs(lastProcData);
+  });
+};
+
 // ---- Refresh loop ----
 
 /**
@@ -290,19 +362,24 @@ const card = (fs) => {
  */
 const refresh = async () => {
   try {
-    const [diskResp, sysResp] = await Promise.all([
+    const [diskResp, sysResp, procResp] = await Promise.all([
       fetch('/api/disk'),
       fetch('/api/system'),
+      fetch('/api/processes'),
     ]);
     if (!diskResp.ok) throw new Error(`disk: HTTP ${diskResp.status}`);
     if (!sysResp.ok)  throw new Error(`system: HTTP ${sysResp.status}`);
+    if (!procResp.ok) throw new Error(`processes: HTTP ${procResp.status}`);
 
     /** @type {FSInfo[]} */
     const diskData = await diskResp.json();
     /** @type {SystemInfo} */
     const sysData  = await sysResp.json();
+    /** @type {ProcessesResponse} */
+    const procData = await procResp.json();
 
     renderSystem(sysData);
+    renderProcs(procData);
 
     const grid = document.getElementById('grid');
     if (grid) {
