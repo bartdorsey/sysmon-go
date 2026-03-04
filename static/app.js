@@ -121,9 +121,12 @@ const drawGraph = (canvas, data, level) => {
     ctx.stroke();
   }
 
-  // Pre-compute pixel coordinates
+  // Pre-compute pixel coordinates.
+  // Use a fixed step based on MAX_HISTORY so the newest point is always at the
+  // right edge and the graph fills in from right to left as data accumulates.
+  const step = w / (MAX_HISTORY - 1);
   const pts = data.map((v, i) => ({
-    x: (i / (data.length - 1)) * w,
+    x: w - (data.length - 1 - i) * step,
     y: h - (Math.min(Math.max(v, 0), 100) / 100) * h,
   }));
 
@@ -164,9 +167,9 @@ const renderCores = (cores) => {
     const c = lvl(pct);
     return (
       `<div class="core-item">` +
-        `<span class="core-label">C${i}</span>` +
-        `<div class="core-track"><div class="core-fill ${c}" style="width:${Math.min(pct, 100).toFixed(1)}%"></div></div>` +
         `<span class="core-pct">${pct.toFixed(0)}%</span>` +
+        `<div class="core-track"><div class="core-fill ${c}" style="height:${Math.min(pct, 100).toFixed(1)}%"></div></div>` +
+        `<span class="core-label">C${i}</span>` +
       `</div>`
     );
   }).join('');
@@ -182,10 +185,14 @@ const renderCores = (cores) => {
 const cpuCard = (pct, cores) => {
   const c = lvl(pct);
   return (
-    `<div class="card sys-card">` +
-      `<div class="sys-label">CPU</div>` +
-      `<div class="sys-pct ${c}">${pct.toFixed(1)}%</div>` +
-      `<canvas id="graph-cpu" class="sys-graph"></canvas>` +
+    `<div class="card sys-card sys-card-cpu">` +
+      `<div class="cpu-top">` +
+        `<div class="cpu-main">` +
+          `<div class="sys-label">CPU</div>` +
+          `<div class="sys-pct ${c}">${pct.toFixed(1)}%</div>` +
+        `</div>` +
+        `<canvas id="graph-cpu" class="sys-graph cpu-graph"></canvas>` +
+      `</div>` +
       renderCores(cores) +
     `</div>`
   );
@@ -221,17 +228,20 @@ const renderSystem = (data) => {
   pushHistory(memHistory,  data.memory.usedPct);
   pushHistory(swapHistory, data.swap.usedPct);
 
-  let html = cpuCard(data.cpuPct, data.cores);
-  html += sysCard('mem', 'Memory', data.memory.usedPct,
+  // CPU card lives outside sys-grid so it doesn't constrain the grid column count.
+  const cpuContainer = document.getElementById('cpu-card');
+  if (cpuContainer) cpuContainer.innerHTML = cpuCard(data.cpuPct, data.cores);
+
+  let memHtml = sysCard('mem', 'Memory', data.memory.usedPct,
     `${fmt(data.memory.used)} / ${fmt(data.memory.total)}`);
   if (data.swap.total > 0) {
-    html += sysCard('swap', 'Swap', data.swap.usedPct,
+    memHtml += sysCard('swap', 'Swap', data.swap.usedPct,
       `${fmt(data.swap.used)} / ${fmt(data.swap.total)}`);
   }
 
   // Set innerHTML first so canvas elements exist in the DOM before drawing.
   const sysGrid = document.getElementById('sys-grid');
-  if (sysGrid) sysGrid.innerHTML = html;
+  if (sysGrid) sysGrid.innerHTML = memHtml;
 
   /** @param {string} id @returns {HTMLCanvasElement|null} */
   const getCanvas = (id) => /** @type {HTMLCanvasElement|null} */ (document.getElementById(id));
