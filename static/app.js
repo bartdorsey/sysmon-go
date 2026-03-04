@@ -1,3 +1,5 @@
+// @ts-check
+
 /**
  * @typedef {Object} FSInfo
  * @property {string} mountPoint - Filesystem mount point path
@@ -33,148 +35,269 @@
  * @property {SwapInfo} swap   - Swap info
  */
 
+// ---- History buffers ----
+
+/** Maximum number of data points retained per metric. */
+const MAX_HISTORY = 60;
+
+/** @type {number[]} Rolling CPU usage history (percentages). */
+const cpuHistory = [];
+
+/** @type {number[]} Rolling memory usage history (percentages). */
+const memHistory = [];
+
+/** @type {number[]} Rolling swap usage history (percentages). */
+const swapHistory = [];
+
+/**
+ * Append a value to a history array, capping it at MAX_HISTORY entries.
+ * @param {number[]} arr - The history array to update.
+ * @param {number}   val - Value to append.
+ */
+const pushHistory = (arr, val) => {
+  arr.push(val);
+  if (arr.length > MAX_HISTORY) arr.shift();
+};
+
+// ---- Utilities ----
+
 /**
  * Format a byte count into a human-readable string.
  * @param {number} b - Bytes
  * @returns {string}
  */
-function fmt(b) {
-  if (b === 0) return '0 B';
-  var k = 1024, s = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-  var i = Math.floor(Math.log(b) / Math.log(k));
-  return (b / Math.pow(k, i)).toFixed(1) + '\u00a0' + s[i];
-}
+const fmt = (b) => {
+  if (b === 0) return '0\u00a0B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const i = Math.floor(Math.log(b) / Math.log(k));
+  return `${(b / k ** i).toFixed(1)}\u00a0${sizes[i]}`;
+};
 
 /**
  * Return a CSS level class name based on usage percentage.
  * @param {number} p - Usage percentage (0-100)
  * @returns {'ok'|'warn'|'crit'}
  */
-function lvl(p) {
-  return p < 70 ? 'ok' : p < 85 ? 'warn' : 'crit';
-}
+const lvl = (p) => p < 70 ? 'ok' : p < 85 ? 'warn' : 'crit';
+
+// ---- Graph ----
+
+/** @type {Record<string, string>} Map of level name to hex colour. */
+const PALETTE = { ok: '#3fb950', warn: '#d29922', crit: '#f85149' };
 
 /**
- * Build an HTML string for a system stat card (CPU, Memory, or Swap).
- * @param {string} title   - Card title
- * @param {number} pct     - Usage percentage (0-100)
- * @param {string} subline - Secondary info line (e.g. "used / total")
+ * Draw a time-series line graph on a canvas element.
+ * Accounts for devicePixelRatio for crisp rendering on HiDPI displays.
+ * @param {HTMLCanvasElement|null} canvas
+ * @param {number[]} data          - Percentage values (0-100), oldest first.
+ * @param {'ok'|'warn'|'crit'} level
+ */
+const drawGraph = (canvas, data, level) => {
+  if (!canvas || data.length < 2) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const dpr  = window.devicePixelRatio || 1;
+  const cssW = canvas.offsetWidth;
+  const cssH = canvas.offsetHeight;
+  canvas.width  = cssW * dpr;
+  canvas.height = cssH * dpr;
+  ctx.scale(dpr, dpr);
+
+  const w     = cssW;
+  const h     = cssH;
+  const color = PALETTE[level] ?? PALETTE.ok;
+
+  // Subtle horizontal grid lines at 25 / 50 / 75 %
+  for (const p of [0.25, 0.5, 0.75]) {
+    ctx.beginPath();
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 1;
+    ctx.moveTo(0, h * (1 - p));
+    ctx.lineTo(w, h * (1 - p));
+    ctx.stroke();
+  }
+
+  // Pre-compute pixel coordinates
+  const pts = data.map((v, i) => ({
+    x: (i / (data.length - 1)) * w,
+    y: h - (Math.min(Math.max(v, 0), 100) / 100) * h,
+  }));
+
+  // Gradient fill under the line
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, h);
+  for (const p of pts) ctx.lineTo(p.x, p.y);
+  ctx.lineTo(pts[pts.length - 1].x, h);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, `${color}55`);
+  grad.addColorStop(1, `${color}08`);
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  pts.forEach((p, i) => {
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else         ctx.lineTo(p.x, p.y);
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth   = 1.5;
+  ctx.lineJoin    = 'round';
+  ctx.stroke();
+};
+
+// ---- System cards ----
+
+/**
+ * Build an HTML string for a system stat card with an embedded graph canvas.
+ * @param {string} id      - Unique canvas ID suffix (e.g. 'cpu', 'mem').
+ * @param {string} title   - Card title.
+ * @param {number} pct     - Current usage percentage (0-100).
+ * @param {string} subline - Secondary info line (e.g. "used / total").
  * @returns {string}
  */
-function sysCard(title, pct, subline) {
-  var c = lvl(pct);
-  return '<div class="card sys-card">' +
-    '<div class="sys-label">' + title + '</div>' +
-    '<div class="sys-pct ' + c + '">' + pct.toFixed(1) + '%</div>' +
-    '<div class="track"><div class="fill ' + c + '" style="width:' + pct.toFixed(1) + '%"></div></div>' +
-    '<div class="sys-sub">' + subline + '</div>' +
-  '</div>';
-}
+const sysCard = (id, title, pct, subline) => {
+  const c = lvl(pct);
+  return (
+    `<div class="card sys-card">` +
+      `<div class="sys-label">${title}</div>` +
+      `<div class="sys-pct ${c}">${pct.toFixed(1)}%</div>` +
+      `<canvas id="graph-${id}" class="sys-graph"></canvas>` +
+      `<div class="sys-sub">${subline}</div>` +
+    `</div>`
+  );
+};
 
 /**
- * Render system stats (CPU, memory, swap) into the sys-grid element.
+ * Render system stats (CPU, memory, swap) into the sys-grid element,
+ * then draw the history graphs on each card's canvas.
  * @param {SystemInfo} data
  */
-function renderSystem(data) {
-  var html = sysCard('CPU', data.cpuPct, '&nbsp;');
-  html += sysCard(
-    'Memory',
-    data.memory.usedPct,
-    fmt(data.memory.used) + ' / ' + fmt(data.memory.total)
-  );
+const renderSystem = (data) => {
+  pushHistory(cpuHistory,  data.cpuPct);
+  pushHistory(memHistory,  data.memory.usedPct);
+  pushHistory(swapHistory, data.swap.usedPct);
+
+  let html = sysCard('cpu', 'CPU', data.cpuPct, '&nbsp;');
+  html += sysCard('mem', 'Memory', data.memory.usedPct,
+    `${fmt(data.memory.used)} / ${fmt(data.memory.total)}`);
   if (data.swap.total > 0) {
-    html += sysCard(
-      'Swap',
-      data.swap.usedPct,
-      fmt(data.swap.used) + ' / ' + fmt(data.swap.total)
-    );
+    html += sysCard('swap', 'Swap', data.swap.usedPct,
+      `${fmt(data.swap.used)} / ${fmt(data.swap.total)}`);
   }
-  document.getElementById('sys-grid').innerHTML = html;
-}
+
+  // Set innerHTML first so canvas elements exist in the DOM before drawing.
+  const sysGrid = document.getElementById('sys-grid');
+  if (sysGrid) sysGrid.innerHTML = html;
+
+  /** @param {string} id @returns {HTMLCanvasElement|null} */
+  const getCanvas = (id) => /** @type {HTMLCanvasElement|null} */ (document.getElementById(id));
+
+  drawGraph(getCanvas('graph-cpu'), cpuHistory,  lvl(data.cpuPct));
+  drawGraph(getCanvas('graph-mem'), memHistory,  lvl(data.memory.usedPct));
+  if (data.swap.total > 0) {
+    drawGraph(getCanvas('graph-swap'), swapHistory, lvl(data.swap.usedPct));
+  }
+};
+
+// ---- Filesystem cards ----
 
 /**
  * Build the HTML string for a single filesystem card.
  * @param {FSInfo} fs
  * @returns {string}
  */
-function card(fs) {
-  var c = lvl(fs.usedPct);
-  var p = fs.usedPct.toFixed(1);
-  return '<div class="card">' +
-    '<div class="card-top">' +
-      '<div>' +
-        '<div class="mount">' + fs.mountPoint + '</div>' +
-        '<div class="device">' + fs.device + '</div>' +
-      '</div>' +
-      '<span class="badge">' + fs.fsType + '</span>' +
-    '</div>' +
-    '<div class="track"><div class="fill ' + c + '" style="width:' + p + '%"></div></div>' +
-    '<div class="nums">' +
-      '<div><div class="num-label">Free</div><div class="num-value">' + fmt(fs.free) + '</div></div>' +
-      '<div><div class="num-label">Used</div><div class="num-value ' + c + '">' + p + '%</div></div>' +
-      '<div><div class="num-label">Total</div><div class="num-value">' + fmt(fs.total) + '</div></div>' +
-    '</div>' +
-  '</div>';
-}
+const card = (fs) => {
+  const c = lvl(fs.usedPct);
+  const p = fs.usedPct.toFixed(1);
+  return (
+    `<div class="card">` +
+      `<div class="card-top">` +
+        `<div>` +
+          `<div class="mount">${fs.mountPoint}</div>` +
+          `<div class="device">${fs.device}</div>` +
+        `</div>` +
+        `<span class="badge">${fs.fsType}</span>` +
+      `</div>` +
+      `<div class="track"><div class="fill ${c}" style="width:${p}%"></div></div>` +
+      `<div class="nums">` +
+        `<div><div class="num-label">Free</div><div class="num-value">${fmt(fs.free)}</div></div>` +
+        `<div><div class="num-label">Used</div><div class="num-value ${c}">${p}%</div></div>` +
+        `<div><div class="num-label">Total</div><div class="num-value">${fmt(fs.total)}</div></div>` +
+      `</div>` +
+    `</div>`
+  );
+};
+
+// ---- Refresh loop ----
 
 /**
  * Fetch fresh disk and system data from the API and re-render the page.
  * @returns {Promise<void>}
  */
-async function refresh() {
+const refresh = async () => {
   try {
-    var [diskResp, sysResp] = await Promise.all([
+    const [diskResp, sysResp] = await Promise.all([
       fetch('/api/disk'),
-      fetch('/api/system')
+      fetch('/api/system'),
     ]);
-    if (!diskResp.ok) throw new Error('disk: HTTP ' + diskResp.status);
-    if (!sysResp.ok) throw new Error('system: HTTP ' + sysResp.status);
+    if (!diskResp.ok) throw new Error(`disk: HTTP ${diskResp.status}`);
+    if (!sysResp.ok)  throw new Error(`system: HTTP ${sysResp.status}`);
 
     /** @type {FSInfo[]} */
-    var diskData = await diskResp.json();
+    const diskData = await diskResp.json();
     /** @type {SystemInfo} */
-    var sysData = await sysResp.json();
+    const sysData  = await sysResp.json();
 
     renderSystem(sysData);
 
-    var grid = document.getElementById('grid');
-    grid.innerHTML = diskData.length
-      ? diskData.map(card).join('')
-      : '<div class="msg">No filesystems found.</div>';
+    const grid = document.getElementById('grid');
+    if (grid) {
+      grid.innerHTML = diskData.length
+        ? diskData.map(card).join('')
+        : '<div class="msg">No filesystems found.</div>';
+    }
   } catch (e) {
-    document.getElementById('grid').innerHTML = '<div class="msg">Error: ' + e.message + '</div>';
+    const msg = e instanceof Error ? e.message : String(e);
+    const grid = document.getElementById('grid');
+    if (grid) grid.innerHTML = `<div class="msg">Error: ${msg}</div>`;
   }
-}
+};
+
+// ---- Refresh rate ----
 
 /** Default refresh interval in milliseconds. */
-var DEFAULT_RATE = 5000;
+const DEFAULT_RATE = 5000;
 
 /** @type {number|null} Active interval timer ID. */
-var intervalId = null;
+let intervalId = null;
 
 /**
  * Read the saved refresh rate from localStorage.
  * @returns {number} Milliseconds between refreshes.
  */
-function getSavedRate() {
-  return parseInt(localStorage.getItem('refreshRate') || String(DEFAULT_RATE), 10);
-}
+const getSavedRate = () =>
+  parseInt(localStorage.getItem('refreshRate') ?? String(DEFAULT_RATE), 10);
 
 /**
  * Apply a new refresh rate: persist it, clear the old timer, start a new one.
  * @param {number} ms - Milliseconds between refreshes.
  */
-function applyRate(ms) {
+const applyRate = (ms) => {
   localStorage.setItem('refreshRate', String(ms));
   if (intervalId !== null) clearInterval(intervalId);
   intervalId = setInterval(refresh, ms);
-}
+};
 
-var rateSelect = document.getElementById('rate-select');
-rateSelect.value = String(getSavedRate());
-rateSelect.addEventListener('change', function() {
-  applyRate(parseInt(rateSelect.value, 10));
-});
+const rateSelect = /** @type {HTMLSelectElement|null} */ (document.getElementById('rate-select'));
+if (rateSelect) {
+  rateSelect.value = String(getSavedRate());
+  rateSelect.addEventListener('change', () => applyRate(parseInt(rateSelect.value, 10)));
+}
 
 refresh();
 applyRate(getSavedRate());
