@@ -3,14 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Disk Space Monitor</title>
+  <title>System Monitor</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header>
-    <h1>&#128190; Disk Space Monitor</h1>
+    <h1>&#128421; System Monitor</h1>
     <div class="status"><span class="dot"></span>Live &mdash; refreshes every 5s</div>
   </header>
+  <div class="sys-grid" id="sys-grid"><div class="msg">Loading&hellip;</div></div>
+  <div class="section-title">Filesystems</div>
   <div class="grid" id="grid"><div class="msg">Loading&hellip;</div></div>
   <script src="/app.js"></script>
 </body>

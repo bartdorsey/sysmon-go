@@ -10,6 +10,30 @@
  */
 
 /**
+ * @typedef {Object} MemInfo
+ * @property {number} total     - Total bytes
+ * @property {number} used      - Used bytes
+ * @property {number} free      - Free bytes
+ * @property {number} available - Available bytes
+ * @property {number} usedPct   - Used percentage (0-100)
+ */
+
+/**
+ * @typedef {Object} SwapInfo
+ * @property {number} total   - Total bytes
+ * @property {number} used    - Used bytes
+ * @property {number} free    - Free bytes
+ * @property {number} usedPct - Used percentage (0-100)
+ */
+
+/**
+ * @typedef {Object} SystemInfo
+ * @property {number}   cpuPct - CPU usage percentage (0-100)
+ * @property {MemInfo}  memory - Memory info
+ * @property {SwapInfo} swap   - Swap info
+ */
+
+/**
  * Format a byte count into a human-readable string.
  * @param {number} b - Bytes
  * @returns {string}
@@ -22,12 +46,50 @@ function fmt(b) {
 }
 
 /**
- * Return a CSS class name based on usage percentage.
+ * Return a CSS level class name based on usage percentage.
  * @param {number} p - Usage percentage (0-100)
  * @returns {'ok'|'warn'|'crit'}
  */
 function lvl(p) {
   return p < 70 ? 'ok' : p < 85 ? 'warn' : 'crit';
+}
+
+/**
+ * Build an HTML string for a system stat card (CPU, Memory, or Swap).
+ * @param {string} title   - Card title
+ * @param {number} pct     - Usage percentage (0-100)
+ * @param {string} subline - Secondary info line (e.g. "used / total")
+ * @returns {string}
+ */
+function sysCard(title, pct, subline) {
+  var c = lvl(pct);
+  return '<div class="card sys-card">' +
+    '<div class="sys-label">' + title + '</div>' +
+    '<div class="sys-pct ' + c + '">' + pct.toFixed(1) + '%</div>' +
+    '<div class="track"><div class="fill ' + c + '" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+    '<div class="sys-sub">' + subline + '</div>' +
+  '</div>';
+}
+
+/**
+ * Render system stats (CPU, memory, swap) into the sys-grid element.
+ * @param {SystemInfo} data
+ */
+function renderSystem(data) {
+  var html = sysCard('CPU', data.cpuPct, '&nbsp;');
+  html += sysCard(
+    'Memory',
+    data.memory.usedPct,
+    fmt(data.memory.used) + ' / ' + fmt(data.memory.total)
+  );
+  if (data.swap.total > 0) {
+    html += sysCard(
+      'Swap',
+      data.swap.usedPct,
+      fmt(data.swap.used) + ' / ' + fmt(data.swap.total)
+    );
+  }
+  document.getElementById('sys-grid').innerHTML = html;
 }
 
 /**
@@ -56,18 +118,28 @@ function card(fs) {
 }
 
 /**
- * Fetch fresh disk data from the API and re-render the grid.
+ * Fetch fresh disk and system data from the API and re-render the page.
  * @returns {Promise<void>}
  */
 async function refresh() {
   try {
-    var r = await fetch('/api/disk');
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    var [diskResp, sysResp] = await Promise.all([
+      fetch('/api/disk'),
+      fetch('/api/system')
+    ]);
+    if (!diskResp.ok) throw new Error('disk: HTTP ' + diskResp.status);
+    if (!sysResp.ok) throw new Error('system: HTTP ' + sysResp.status);
+
     /** @type {FSInfo[]} */
-    var data = await r.json();
+    var diskData = await diskResp.json();
+    /** @type {SystemInfo} */
+    var sysData = await sysResp.json();
+
+    renderSystem(sysData);
+
     var grid = document.getElementById('grid');
-    grid.innerHTML = data.length
-      ? data.map(card).join('')
+    grid.innerHTML = diskData.length
+      ? diskData.map(card).join('')
       : '<div class="msg">No filesystems found.</div>';
   } catch (e) {
     document.getElementById('grid').innerHTML = '<div class="msg">Error: ' + e.message + '</div>';
