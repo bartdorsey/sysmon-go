@@ -146,5 +146,35 @@ async function refresh() {
   }
 }
 
+/** Default refresh interval in milliseconds. */
+var DEFAULT_RATE = 5000;
+
+/** @type {number|null} Active interval timer ID. */
+var intervalId = null;
+
+/**
+ * Read the saved refresh rate from localStorage.
+ * @returns {number} Milliseconds between refreshes.
+ */
+function getSavedRate() {
+  return parseInt(localStorage.getItem('refreshRate') || String(DEFAULT_RATE), 10);
+}
+
+/**
+ * Apply a new refresh rate: persist it, clear the old timer, start a new one.
+ * @param {number} ms - Milliseconds between refreshes.
+ */
+function applyRate(ms) {
+  localStorage.setItem('refreshRate', String(ms));
+  if (intervalId !== null) clearInterval(intervalId);
+  intervalId = setInterval(refresh, ms);
+}
+
+var rateSelect = document.getElementById('rate-select');
+rateSelect.value = String(getSavedRate());
+rateSelect.addEventListener('change', function() {
+  applyRate(parseInt(rateSelect.value, 10));
+});
+
 refresh();
-setInterval(refresh, 5000);
+applyRate(getSavedRate());
