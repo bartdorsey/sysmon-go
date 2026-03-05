@@ -608,6 +608,91 @@ func getProcesses() (ProcessesResponse, error) {
 	return ProcessesResponse{ByCPU: byCPU, ByMem: byMem}, nil
 }
 
+// ---------- Network ----------
+
+// NetIface holds per-interface I/O rates computed from consecutive /proc/net/dev samples.
+type NetIface struct {
+	Name    string  `json:"name"`
+	RxRate  float64 `json:"rxRate"`  // bytes/sec
+	TxRate  float64 `json:"txRate"`  // bytes/sec
+	RxTotal uint64  `json:"rxTotal"` // cumulative bytes
+	TxTotal uint64  `json:"txTotal"` // cumulative bytes
+}
+
+type netSnapshot struct {
+	rx uint64
+	tx uint64
+	at time.Time
+}
+
+var (
+	prevNetSnaps map[string]netSnapshot
+	prevNetMu    sync.Mutex
+)
+
+func getNetworkIO() ([]NetIface, error) {
+	f, err := os.Open(procPath("net/dev"))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	now := time.Now()
+	prevNetMu.Lock()
+	old := prevNetSnaps
+	newSnaps := make(map[string]netSnapshot)
+	prevNetMu.Unlock()
+
+	var result []NetIface
+	scanner := bufio.NewScanner(f)
+	// Skip two header lines.
+	scanner.Scan()
+	scanner.Scan()
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		colon := strings.Index(line, ":")
+		if colon < 0 {
+			continue
+		}
+		name := strings.TrimSpace(line[:colon])
+		if name == "lo" {
+			continue
+		}
+		fields := strings.Fields(line[colon+1:])
+		if len(fields) < 9 {
+			continue
+		}
+		rxBytes, _ := strconv.ParseUint(fields[0], 10, 64)
+		txBytes, _ := strconv.ParseUint(fields[8], 10, 64)
+		newSnaps[name] = netSnapshot{rx: rxBytes, tx: txBytes, at: now}
+
+		var rxRate, txRate float64
+		if prev, ok := old[name]; ok {
+			if dt := now.Sub(prev.at).Seconds(); dt > 0 {
+				if rxBytes >= prev.rx {
+					rxRate = float64(rxBytes-prev.rx) / dt
+				}
+				if txBytes >= prev.tx {
+					txRate = float64(txBytes-prev.tx) / dt
+				}
+			}
+		}
+		result = append(result, NetIface{
+			Name:    name,
+			RxRate:  rxRate,
+			TxRate:  txRate,
+			RxTotal: rxBytes,
+			TxTotal: txBytes,
+		})
+	}
+
+	prevNetMu.Lock()
+	prevNetSnaps = newSnaps
+	prevNetMu.Unlock()
+
+	return result, scanner.Err()
+}
+
 // ---------- Main ----------
 
 func main() {
@@ -624,6 +709,12 @@ func main() {
 	prevProcSnaps = make(map[int]procSnapshot)
 	prevProcMu.Unlock()
 	getProcesses() //nolint — discard first sample, used only to populate snapshots
+
+	// Prime the network snapshots.
+	prevNetMu.Lock()
+	prevNetSnaps = make(map[string]netSnapshot)
+	prevNetMu.Unlock()
+	getNetworkIO() //nolint — discard first sample, used only to populate snapshots
 
 	sub, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -663,6 +754,20 @@ func main() {
 		if err != nil {
 			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 			return
+		}
+		json.NewEncoder(w).Encode(info)
+	})
+
+	http.HandleFunc("/api/network", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
+		info, err := getNetworkIO()
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+		if info == nil {
+			info = []NetIface{}
 		}
 		json.NewEncoder(w).Encode(info)
 	})

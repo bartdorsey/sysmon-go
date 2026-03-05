@@ -37,6 +37,15 @@
  */
 
 /**
+ * @typedef {Object} NetIface
+ * @property {string} name
+ * @property {number} rxRate  - bytes/sec received
+ * @property {number} txRate  - bytes/sec transmitted
+ * @property {number} rxTotal - cumulative bytes received
+ * @property {number} txTotal - cumulative bytes transmitted
+ */
+
+/**
  * @typedef {Object} ProcInfo
  * @property {number} pid
  * @property {string} name
@@ -63,6 +72,9 @@ const memHistory = [];
 
 /** @type {number[]} Rolling swap usage history (percentages). */
 const swapHistory = [];
+
+/** @type {Record<string, number[]>} Rolling total throughput history (bytes/sec) per interface. */
+const netHistory = {};
 
 /**
  * Append a value to a history array, capping it at MAX_HISTORY entries.
@@ -354,6 +366,63 @@ const renderProcs = (data) => {
   });
 };
 
+// ---- Network cards ----
+
+/**
+ * Format a bytes/sec rate as a human-readable string.
+ * @param {number} bps
+ * @returns {string}
+ */
+const fmtRate = (bps) => `${fmt(bps)}/s`;
+
+/**
+ * Draw a network throughput graph, normalising values against the peak in the history.
+ * @param {HTMLCanvasElement|null} canvas
+ * @param {number[]} data - Absolute bytes/sec values, oldest first.
+ */
+const drawNetGraph = (canvas, data) => {
+  const peak = Math.max(...data, 1);
+  drawGraph(canvas, data.map(v => (v / peak) * 100), 'ok');
+};
+
+/**
+ * Build a network interface card.
+ * @param {NetIface} iface
+ * @returns {string}
+ */
+const netCard = (iface) => {
+  if (!netHistory[iface.name]) netHistory[iface.name] = [];
+  pushHistory(netHistory[iface.name], iface.rxRate + iface.txRate);
+  return (
+    `<div class="card sys-card">` +
+      `<div class="sys-label">${iface.name}</div>` +
+      `<canvas id="graph-net-${iface.name}" class="sys-graph"></canvas>` +
+      `<div class="net-rates">` +
+        `<div><span class="net-dir">&#8595;</span> ${fmtRate(iface.rxRate)}</div>` +
+        `<div><span class="net-dir">&#8593;</span> ${fmtRate(iface.txRate)}</div>` +
+      `</div>` +
+    `</div>`
+  );
+};
+
+/**
+ * Render network interfaces into #net-grid.
+ * @param {NetIface[]} data
+ */
+const renderNetwork = (data) => {
+  const grid = document.getElementById('net-grid');
+  if (!grid) return;
+  if (!data.length) {
+    grid.innerHTML = '<div class="msg">No network interfaces found.</div>';
+    return;
+  }
+  grid.innerHTML = data.map(netCard).join('');
+  for (const iface of data) {
+    const canvas = /** @type {HTMLCanvasElement|null} */ (document.getElementById(`graph-net-${iface.name}`));
+    if (canvas && netHistory[iface.name]) drawNetGraph(canvas, netHistory[iface.name]);
+  }
+};
+
 // ---- Refresh loop ----
 
 /**
@@ -362,14 +431,16 @@ const renderProcs = (data) => {
  */
 const refresh = async () => {
   try {
-    const [diskResp, sysResp, procResp] = await Promise.all([
+    const [diskResp, sysResp, procResp, netResp] = await Promise.all([
       fetch('/api/disk'),
       fetch('/api/system'),
       fetch('/api/processes'),
+      fetch('/api/network'),
     ]);
     if (!diskResp.ok) throw new Error(`disk: HTTP ${diskResp.status}`);
     if (!sysResp.ok)  throw new Error(`system: HTTP ${sysResp.status}`);
     if (!procResp.ok) throw new Error(`processes: HTTP ${procResp.status}`);
+    if (!netResp.ok)  throw new Error(`network: HTTP ${netResp.status}`);
 
     /** @type {FSInfo[]} */
     const diskData = await diskResp.json();
@@ -377,9 +448,12 @@ const refresh = async () => {
     const sysData  = await sysResp.json();
     /** @type {ProcessesResponse} */
     const procData = await procResp.json();
+    /** @type {NetIface[]} */
+    const netData  = await netResp.json();
 
     renderSystem(sysData);
     renderProcs(procData);
+    renderNetwork(netData);
 
     const grid = document.getElementById('grid');
     if (grid) {
