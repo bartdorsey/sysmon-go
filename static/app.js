@@ -43,6 +43,9 @@
  * @property {number} txRate  - bytes/sec transmitted
  * @property {number} rxTotal - cumulative bytes received
  * @property {number} txTotal - cumulative bytes transmitted
+ * @property {string} mac     - MAC address
+ * @property {number} speed   - link speed in Mbps (0 = unknown)
+ * @property {string} driver  - kernel driver name
  */
 
 /**
@@ -57,6 +60,13 @@
  * @typedef {Object} ProcessesResponse
  * @property {ProcInfo[]} byCPU
  * @property {ProcInfo[]} byMem
+ */
+
+/**
+ * @typedef {Object} HardwareInfo
+ * @property {string} cpuModel - e.g. "Intel(R) Core(TM) i9-13900K CPU @ 3.00GHz"
+ * @property {string} ramType  - e.g. "DDR4"
+ * @property {string} ramSpeed - e.g. "3200 MT/s"
  */
 
 // ---- History buffers ----
@@ -75,6 +85,9 @@ const swapHistory = [];
 
 /** @type {Record<string, number[]>} Rolling total throughput history (bytes/sec) per interface. */
 const netHistory = {};
+
+/** @type {HardwareInfo} Cached hardware info fetched once on load. */
+let hwInfo = { cpuModel: '', ramType: '', ramSpeed: '' };
 
 /**
  * Append a value to a history array, capping it at MAX_HISTORY entries.
@@ -210,11 +223,12 @@ const renderCores = (cores) => {
  */
 const cpuCard = (pct, cores) => {
   const c = lvl(pct);
+  const label = hwInfo.cpuModel || 'CPU';
   return (
     `<div class="card sys-card sys-card-cpu">` +
       `<div class="cpu-top">` +
         `<div class="cpu-main">` +
-          `<div class="sys-label">CPU</div>` +
+          `<div class="sys-label">${label}</div>` +
           `<div class="sys-pct ${c}">${pct.toFixed(1)}%</div>` +
         `</div>` +
         `<canvas id="graph-cpu" class="sys-graph cpu-graph"></canvas>` +
@@ -258,7 +272,11 @@ const renderSystem = (data) => {
   const cpuContainer = document.getElementById('cpu-card');
   if (cpuContainer) cpuContainer.innerHTML = cpuCard(data.cpuPct, data.cores);
 
-  let memHtml = sysCard('mem', 'Memory', data.memory.usedPct,
+  const ramTag = hwInfo.ramType && hwInfo.ramType !== 'Unknown'
+    ? [hwInfo.ramType, hwInfo.ramSpeed].filter(Boolean).join(' ')
+    : '';
+  const memTitle = ramTag || 'Memory';
+  let memHtml = sysCard('mem', memTitle, data.memory.usedPct,
     `${fmt(data.memory.used)} / ${fmt(data.memory.total)}`);
   if (data.swap.total > 0) {
     memHtml += sysCard('swap', 'Swap', data.swap.usedPct,
@@ -393,9 +411,21 @@ const drawNetGraph = (canvas, data) => {
 const netCard = (iface) => {
   if (!netHistory[iface.name]) netHistory[iface.name] = [];
   pushHistory(netHistory[iface.name], iface.rxRate + iface.txRate);
+  const speedStr = iface.speed >= 1000
+    ? `${iface.speed / 1000} GbE`
+    : iface.speed > 0 ? `${iface.speed} Mbps` : '';
+  const metaParts = [iface.driver, speedStr].filter(Boolean);
+  const metaLine = metaParts.length
+    ? `<div class="net-meta">${metaParts.join(' · ')}</div>`
+    : '';
+  const macLine = iface.mac
+    ? `<div class="net-mac">${iface.mac}</div>`
+    : '';
   return (
     `<div class="card sys-card">` +
       `<div class="sys-label">${iface.name}</div>` +
+      metaLine +
+      macLine +
       `<canvas id="graph-net-${iface.name}" class="sys-graph"></canvas>` +
       `<div class="net-rates">` +
         `<div><span class="net-dir">&#8595;</span> ${fmtRate(iface.rxRate)}</div>` +
@@ -431,25 +461,18 @@ const renderNetwork = (data) => {
  */
 const refresh = async () => {
   try {
-    const [diskResp, sysResp, procResp, netResp] = await Promise.all([
-      fetch('/api/disk'),
-      fetch('/api/system'),
-      fetch('/api/processes'),
-      fetch('/api/network'),
-    ]);
-    if (!diskResp.ok) throw new Error(`disk: HTTP ${diskResp.status}`);
-    if (!sysResp.ok)  throw new Error(`system: HTTP ${sysResp.status}`);
-    if (!procResp.ok) throw new Error(`processes: HTTP ${procResp.status}`);
-    if (!netResp.ok)  throw new Error(`network: HTTP ${netResp.status}`);
+    const resp = await fetch('/api/stats');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-    /** @type {FSInfo[]} */
-    const diskData = await diskResp.json();
+    const data = await resp.json();
     /** @type {SystemInfo} */
-    const sysData  = await sysResp.json();
+    const sysData  = data.system;
+    /** @type {FSInfo[]} */
+    const diskData = data.disk;
     /** @type {ProcessesResponse} */
-    const procData = await procResp.json();
+    const procData = data.processes;
     /** @type {NetIface[]} */
-    const netData  = await netResp.json();
+    const netData  = data.network;
 
     renderSystem(sysData);
     renderProcs(procData);
@@ -498,6 +521,10 @@ if (rateSelect) {
   rateSelect.value = String(getSavedRate());
   rateSelect.addEventListener('change', () => applyRate(parseInt(rateSelect.value, 10)));
 }
+
+fetch('/api/hardware')
+  .then((r) => r.json())
+  .then((/** @type {HardwareInfo} */ data) => { hwInfo = data; });
 
 refresh();
 applyRate(getSavedRate());

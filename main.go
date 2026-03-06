@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -617,6 +618,34 @@ type NetIface struct {
 	TxRate  float64 `json:"txRate"`  // bytes/sec
 	RxTotal uint64  `json:"rxTotal"` // cumulative bytes
 	TxTotal uint64  `json:"txTotal"` // cumulative bytes
+	MAC     string  `json:"mac"`
+	Speed   int     `json:"speed"`  // Mbps, 0 = unknown
+	Driver  string  `json:"driver"`
+}
+
+// nicSysPath returns the path to a file under /sys/class/net/<iface>/,
+// preferring the host bind-mount when available.
+func nicSysPath(iface, file string) string {
+	host := fmt.Sprintf("/host/sys/class/net/%s/%s", iface, file)
+	if _, err := os.Stat(host); err == nil {
+		return host
+	}
+	return fmt.Sprintf("/sys/class/net/%s/%s", iface, file)
+}
+
+func readNICDetails(iface string) (mac, driver string, speed int) {
+	if b, err := os.ReadFile(nicSysPath(iface, "address")); err == nil {
+		mac = strings.TrimSpace(string(b))
+	}
+	if link, err := os.Readlink(nicSysPath(iface, "device/driver")); err == nil {
+		driver = filepath.Base(link)
+	}
+	if b, err := os.ReadFile(nicSysPath(iface, "speed")); err == nil {
+		if v, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && v > 0 {
+			speed = v
+		}
+	}
+	return mac, driver, speed
 }
 
 type netSnapshot struct {
@@ -677,12 +706,16 @@ func getNetworkIO() ([]NetIface, error) {
 				}
 			}
 		}
+		mac, driver, speed := readNICDetails(name)
 		result = append(result, NetIface{
 			Name:    name,
 			RxRate:  rxRate,
 			TxRate:  txRate,
 			RxTotal: rxBytes,
 			TxTotal: txBytes,
+			MAC:     mac,
+			Speed:   speed,
+			Driver:  driver,
 		})
 	}
 
@@ -722,54 +755,43 @@ func main() {
 	}
 	http.Handle("/", http.FileServer(http.FS(sub)))
 
-	http.HandleFunc("/api/disk", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-cache")
-		info, err := getDiskInfo()
-		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+
+		sys, sysErr := getSystemInfo()
+		disk, diskErr := getDiskInfo()
+		procs, procsErr := getProcesses()
+		net, netErr := getNetworkIO()
+
+		if sysErr != nil || diskErr != nil || procsErr != nil || netErr != nil {
+			var msgs []string
+			for _, e := range []error{sysErr, diskErr, procsErr, netErr} {
+				if e != nil {
+					msgs = append(msgs, e.Error())
+				}
+			}
+			http.Error(w, `{"error":"`+strings.Join(msgs, "; ")+`"}`, http.StatusInternalServerError)
 			return
 		}
-		if info == nil {
-			info = []FSInfo{}
+		if disk == nil {
+			disk = []FSInfo{}
 		}
-		json.NewEncoder(w).Encode(info)
+		if net == nil {
+			net = []NetIface{}
+		}
+		json.NewEncoder(w).Encode(struct {
+			System    SystemInfo        `json:"system"`
+			Disk      []FSInfo          `json:"disk"`
+			Processes ProcessesResponse `json:"processes"`
+			Network   []NetIface        `json:"network"`
+		}{sys, disk, procs, net})
 	})
 
-	http.HandleFunc("/api/system", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/hardware", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-cache")
-		info, err := getSystemInfo()
-		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-			return
-		}
-		json.NewEncoder(w).Encode(info)
-	})
-
-	http.HandleFunc("/api/processes", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-cache")
-		info, err := getProcesses()
-		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-			return
-		}
-		json.NewEncoder(w).Encode(info)
-	})
-
-	http.HandleFunc("/api/network", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-cache")
-		info, err := getNetworkIO()
-		if err != nil {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-			return
-		}
-		if info == nil {
-			info = []NetIface{}
-		}
-		json.NewEncoder(w).Encode(info)
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		json.NewEncoder(w).Encode(getHardwareInfo())
 	})
 
 	log.Println("listening on :8080")

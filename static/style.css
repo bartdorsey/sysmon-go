@@ -300,6 +300,16 @@ h1 { font-size: 1.2rem; font-weight: 600; }
   margin-top: 0.35rem;
 }
 
+.hw-sub {
+  font-size: 0.62rem;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
 /* ---- Section divider ---- */
 
 .section-title {
@@ -417,6 +427,20 @@ h1 { font-size: 1.2rem; font-weight: 600; }
 
 .net-dir {
   color: var(--accent);
+}
+
+.net-meta {
+  font-size: 0.62rem;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+
+.net-mac {
+  font-size: 0.6rem;
+  color: var(--muted);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  margin-bottom: 0.3rem;
+  opacity: 0.7;
 }
 
 /* ---- Generic message ---- */
