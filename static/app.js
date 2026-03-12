@@ -30,10 +30,11 @@
 
 /**
  * @typedef {Object} SystemInfo
- * @property {number}   cpuPct - Overall CPU usage percentage (0-100)
- * @property {number[]} cores  - Per-core usage percentages (0-100)
- * @property {MemInfo}  memory - Memory info
- * @property {SwapInfo} swap   - Swap info
+ * @property {number}   cpuPct  - Overall CPU usage percentage (0-100)
+ * @property {number[]} cores   - Per-core usage percentages (0-100)
+ * @property {MemInfo}  memory  - Memory info
+ * @property {SwapInfo} swap    - Swap info
+ * @property {string}   uptime  - e.g. "3d 14h 22m"
  */
 
 /**
@@ -68,6 +69,9 @@
  * @property {string} cpuModel - e.g. "Intel(R) Core(TM) i9-13900K CPU @ 3.00GHz"
  * @property {string} ramType  - e.g. "DDR4"
  * @property {string} ramSpeed - e.g. "3200 MT/s"
+ * @property {string} os       - e.g. "Ubuntu 22.04.3 LTS"
+ * @property {string} kernel   - e.g. "6.6.114.1-microsoft-standard-WSL2"
+ * @property {number} coreCount - Number of logical CPU cores
  */
 
 // ---- History buffers ----
@@ -88,7 +92,7 @@ const swapHistory = [];
 const netHistory = {};
 
 /** @type {HardwareInfo} Cached hardware info fetched once on load. */
-let hwInfo = { cpuModel: '', ramType: '', ramSpeed: '', hostname: '' };
+let hwInfo = { cpuModel: '', ramType: '', ramSpeed: '', hostname: '', os: '', kernel: '', coreCount: 0 };
 
 /**
  * Append a value to a history array, capping it at MAX_HISTORY entries.
@@ -192,6 +196,39 @@ const drawGraph = (canvas, data, level) => {
   ctx.lineWidth   = 1.5;
   ctx.lineJoin    = 'round';
   ctx.stroke();
+};
+
+// ---- Neofetch bar ----
+
+/** @type {string} Last uptime string from stats refresh. */
+let lastUptime = '';
+
+/**
+ * Render the neofetch-style info bar using cached hardware info and last uptime.
+ */
+const renderNeoBar = () => {
+  const bar = document.getElementById('neo-bar');
+  if (!bar) return;
+
+  const cpuLabel = [hwInfo.cpuModel, hwInfo.coreCount ? `${hwInfo.coreCount} cores` : '']
+    .filter(Boolean).join(' · ');
+  const ramLabel = [hwInfo.ramType, hwInfo.ramSpeed].filter(s => s && s !== 'Unknown').join(' ');
+
+  const fields = /** @type {[string, string][]} */ ([
+    ['OS',     hwInfo.os],
+    ['Kernel', hwInfo.kernel],
+    ['CPU',    cpuLabel],
+    ['RAM',    ramLabel],
+    ['Uptime', lastUptime],
+  ].filter(f => f[1]));
+
+  if (!fields.length) { bar.innerHTML = ''; return; }
+
+  const items = fields.map(([k, v]) =>
+    `<span class="neo-item"><span class="neo-key">${k}</span><span class="neo-val">${v}</span></span>`
+  ).join('');
+
+  bar.innerHTML = `<div class="neo-bar">${items}</div>`;
 };
 
 // ---- System cards ----
@@ -475,6 +512,8 @@ const refresh = async () => {
     /** @type {NetIface[]} */
     const netData  = data.network;
 
+    lastUptime = sysData.uptime || '';
+    renderNeoBar();
     renderSystem(sysData);
     renderProcs(procData);
     renderNetwork(netData);
@@ -532,6 +571,7 @@ fetch('/api/hardware')
       const h1 = document.querySelector('header h1');
       if (h1) h1.textContent = `🖥 ${data.hostname}`;
     }
+    renderNeoBar();
   });
 
 refresh();

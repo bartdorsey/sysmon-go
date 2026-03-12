@@ -80,6 +80,40 @@ h1 { font-size: 1.2rem; font-weight: 600; }
   50%       { opacity: 0.3; }
 }
 
+/* ---- Neofetch bar ---- */
+
+#neo-bar {
+  max-width: 1200px;
+  margin: 0 auto 1rem;
+}
+
+.neo-bar {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.55rem 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 1.5rem;
+}
+
+.neo-item {
+  display: flex;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  white-space: nowrap;
+}
+
+.neo-key {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.neo-val {
+  color: var(--muted);
+}
+
 /* ---- System stats row ---- */
 
 .sys-grid {

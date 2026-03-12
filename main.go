@@ -275,6 +275,7 @@ type SystemInfo struct {
 	Cores  []float64 `json:"cores"`
 	Memory MemInfo   `json:"memory"`
 	Swap   SwapInfo  `json:"swap"`
+	Uptime string    `json:"uptime"` // e.g. "3d 14h 22m"
 }
 
 func getSystemInfo() (SystemInfo, error) {
@@ -319,6 +320,7 @@ func getSystemInfo() (SystemInfo, error) {
 	return SystemInfo{
 		CPUPct: aggPct,
 		Cores:  corePcts,
+		Uptime: getUptime(),
 		Memory: MemInfo{
 			Total:     memTotal,
 			Used:      memUsed,
@@ -339,10 +341,13 @@ func getSystemInfo() (SystemInfo, error) {
 
 // HardwareInfo holds static CPU and RAM details, read once at startup.
 type HardwareInfo struct {
-	CPUModel string `json:"cpuModel"` // e.g. "Intel(R) Core(TM) i9-13900K CPU @ 3.00GHz"
-	RAMType  string `json:"ramType"`  // e.g. "DDR4"
-	RAMSpeed string `json:"ramSpeed"` // e.g. "3200 MT/s"
-	Hostname string `json:"hostname"` // host system hostname
+	CPUModel  string `json:"cpuModel"`  // e.g. "Intel(R) Core(TM) i9-13900K CPU @ 3.00GHz"
+	RAMType   string `json:"ramType"`   // e.g. "DDR4"
+	RAMSpeed  string `json:"ramSpeed"`  // e.g. "3200 MT/s"
+	Hostname  string `json:"hostname"`  // host system hostname
+	OS        string `json:"os"`        // e.g. "Ubuntu 22.04.3 LTS"
+	Kernel    string `json:"kernel"`    // e.g. "6.6.114.1-microsoft-standard-WSL2"
+	CoreCount int    `json:"coreCount"` // number of logical CPU cores
 }
 
 var (
@@ -463,6 +468,75 @@ func getRAMDetails() (ramType, ramSpeed string) {
 	return ramType, ramSpeed
 }
 
+func getUptime() string {
+	data, err := os.ReadFile(procPath("uptime"))
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return ""
+	}
+	secs, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return ""
+	}
+	total := int(secs)
+	days := total / 86400
+	hours := (total % 86400) / 3600
+	mins := (total % 3600) / 60
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh %dm", days, hours, mins)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
+	return fmt.Sprintf("%dm", mins)
+}
+
+func getOSName() string {
+	for _, p := range []string{"/host/etc/os-release", "/etc/os-release"} {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		defer f.Close()
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "PRETTY_NAME=") {
+				return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)
+			}
+		}
+	}
+	return "Linux"
+}
+
+func getKernelVersion() string {
+	for _, p := range []string{"/host/proc/sys/kernel/osrelease", "/proc/sys/kernel/osrelease"} {
+		if data, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return "unknown"
+}
+
+func getCoreCount() int {
+	f, err := os.Open(procPath("cpuinfo"))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	count := 0
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if strings.HasPrefix(scanner.Text(), "processor") {
+			count++
+		}
+	}
+	return count
+}
+
 // getHostname returns the host system's hostname. When running in a container
 // with the host root bind-mounted at /host, it reads /host/etc/hostname
 // directly to avoid returning the container's hostname.
@@ -480,10 +554,13 @@ func getHardwareInfo() HardwareInfo {
 	hwOnce.Do(func() {
 		ramType, ramSpeed := getRAMDetails()
 		hwCache = HardwareInfo{
-			CPUModel: getCPUModel(),
-			RAMType:  ramType,
-			RAMSpeed: ramSpeed,
-			Hostname: getHostname(),
+			CPUModel:  getCPUModel(),
+			RAMType:   ramType,
+			RAMSpeed:  ramSpeed,
+			Hostname:  getHostname(),
+			OS:        getOSName(),
+			Kernel:    getKernelVersion(),
+			CoreCount: getCoreCount(),
 		}
 	})
 	return hwCache
