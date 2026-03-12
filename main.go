@@ -10,7 +10,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -18,6 +20,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	dbus "github.com/godbus/dbus/v5"
 )
 
 //go:embed static
@@ -912,6 +916,200 @@ func getNetworkIO() ([]NetIface, error) {
 	return result, scanner.Err()
 }
 
+// ---------- Services ----------
+
+// ServiceInfo holds the state of a single systemd service unit.
+type ServiceInfo struct {
+	Name        string `json:"name"`
+	LoadState   string `json:"loadState"`
+	ActiveState string `json:"activeState"`
+	SubState    string `json:"subState"`
+	Description string `json:"description"`
+}
+
+// ServicesResponse wraps the services list with an optional error message.
+type ServicesResponse struct {
+	Services []ServiceInfo `json:"services"`
+	Error    string        `json:"error,omitempty"`
+}
+
+var (
+	svcCacheMu   sync.Mutex
+	svcCacheResp ServicesResponse
+	svcCacheAt   time.Time
+)
+
+const svcCacheTTL = 5 * time.Second
+
+// dbusSockPath returns the first reachable D-Bus system socket path.
+func dbusSockPath() string {
+	for _, p := range []string{"/host/run/dbus/system_bus_socket", "/run/dbus/system_bus_socket"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// unitRecord matches the D-Bus ListUnits return signature:
+// (ssssssouso) — name, description, load, active, sub, following,
+// object-path, job-id, job-type, job-object-path
+type unitRecord struct {
+	Name        string
+	Description string
+	LoadState   string
+	ActiveState string
+	SubState    string
+	Following   string
+	Path        dbus.ObjectPath
+	JobID       uint32
+	JobType     string
+	JobPath     dbus.ObjectPath
+}
+
+func fetchServices() ServicesResponse {
+	sock := dbusSockPath()
+	if sock == "" {
+		return ServicesResponse{Services: []ServiceInfo{},
+			Error: "D-Bus system socket not found (checked /host/run/dbus and /run/dbus)"}
+	}
+
+	conn, err := dbus.Dial("unix:path=" + sock)
+	if err != nil {
+		return ServicesResponse{Services: []ServiceInfo{},
+			Error: fmt.Sprintf("D-Bus connect (%s): %v", sock, err)}
+	}
+	defer conn.Close()
+
+	if err := conn.Auth(nil); err != nil {
+		return ServicesResponse{Services: []ServiceInfo{},
+			Error: fmt.Sprintf("D-Bus auth: %v", err)}
+	}
+	if err := conn.Hello(); err != nil {
+		return ServicesResponse{Services: []ServiceInfo{},
+			Error: fmt.Sprintf("D-Bus hello: %v", err)}
+	}
+
+	obj := conn.Object("org.freedesktop.systemd1", "/org/freedesktop/systemd1")
+	var units []unitRecord
+	if err := obj.Call("org.freedesktop.systemd1.Manager.ListUnits", 0).Store(&units); err != nil {
+		return ServicesResponse{Services: []ServiceInfo{},
+			Error: fmt.Sprintf("ListUnits: %v", err)}
+	}
+
+	var services []ServiceInfo
+	for _, u := range units {
+		if !strings.HasSuffix(u.Name, ".service") {
+			continue
+		}
+		services = append(services, ServiceInfo{
+			Name:        strings.TrimSuffix(u.Name, ".service"),
+			LoadState:   u.LoadState,
+			ActiveState: u.ActiveState,
+			SubState:    u.SubState,
+			Description: u.Description,
+		})
+	}
+	return ServicesResponse{Services: services}
+}
+
+func getServices() ServicesResponse {
+	svcCacheMu.Lock()
+	defer svcCacheMu.Unlock()
+	if time.Since(svcCacheAt) < svcCacheTTL && svcCacheResp.Services != nil {
+		return svcCacheResp
+	}
+	svcCacheResp = fetchServices()
+	svcCacheAt = time.Now()
+	return svcCacheResp
+}
+
+// ---------- Logs ----------
+
+// LogEntry holds a single parsed journal log line.
+type LogEntry struct {
+	Timestamp string `json:"timestamp"`
+	Message   string `json:"message"`
+	Priority  int    `json:"priority"` // 0=emerg … 7=debug
+}
+
+var unitNameRe = regexp.MustCompile(`^[a-zA-Z0-9@._-]+$`)
+
+func validUnitName(name string) bool {
+	return len(name) > 0 && len(name) <= 256 && unitNameRe.MatchString(name)
+}
+
+func fetchLogs(unit string) ([]LogEntry, error) {
+	cmd := exec.Command("journalctl",
+		"--root=/host",
+		"-u", unit+".service",
+		"-n", "20",
+		"--no-pager",
+		"--output=json",
+		"--utc",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("journalctl: %v", err)
+	}
+
+	var entries []LogEntry
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			continue
+		}
+
+		// MESSAGE can be a string or an array of byte values.
+		var msg string
+		if m, ok := raw["MESSAGE"]; ok {
+			if err := json.Unmarshal(m, &msg); err != nil {
+				// binary message — decode as byte array
+				var bytes []int
+				if err2 := json.Unmarshal(m, &bytes); err2 == nil {
+					b := make([]byte, len(bytes))
+					for i, v := range bytes {
+						b[i] = byte(v)
+					}
+					msg = string(b)
+				}
+			}
+		}
+
+		var ts string
+		if t, ok := raw["__REALTIME_TIMESTAMP"]; ok {
+			var usStr string
+			if err := json.Unmarshal(t, &usStr); err == nil {
+				if us, err := strconv.ParseInt(usStr, 10, 64); err == nil {
+					ts = time.UnixMicro(us).UTC().Format("Jan 02 15:04:05")
+				}
+			}
+		}
+
+		pri := 7
+		if p, ok := raw["PRIORITY"]; ok {
+			var pStr string
+			if err := json.Unmarshal(p, &pStr); err == nil {
+				if v, err := strconv.Atoi(pStr); err == nil {
+					pri = v
+				}
+			}
+		}
+
+		entries = append(entries, LogEntry{
+			Timestamp: ts,
+			Message:   strings.TrimSpace(msg),
+			Priority:  pri,
+		})
+	}
+	return entries, nil
+}
+
 // ---------- Main ----------
 
 func main() {
@@ -974,10 +1172,34 @@ func main() {
 		}{sys, disk, procs, net})
 	})
 
+	http.HandleFunc("/api/services", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
+		json.NewEncoder(w).Encode(getServices())
+	})
+
 	http.HandleFunc("/api/hardware", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		json.NewEncoder(w).Encode(getHardwareInfo())
+	})
+
+	http.HandleFunc("/api/logs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
+
+		unit := r.URL.Query().Get("unit")
+		if !validUnitName(unit) {
+			http.Error(w, `{"error":"invalid unit name"}`, http.StatusBadRequest)
+			return
+		}
+
+		entries, err := fetchLogs(unit)
+		if err != nil {
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(entries)
 	})
 
 	log.Println("listening on :8080")

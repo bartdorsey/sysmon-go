@@ -8,7 +8,13 @@
 </head>
 <body>
   <header>
-    <h1>&#128421; System Monitor</h1>
+    <div class="header-left">
+      <h1>&#128421; System Monitor</h1>
+      <nav class="nav">
+        <a href="/" class="nav-link nav-active">Dashboard</a>
+        <a href="/services.html" class="nav-link">Services</a>
+      </nav>
+    </div>
     <div class="controls">
       <label class="control-label">Refresh
         <select id="rate-select" class="rate-select">
@@ -22,6 +28,7 @@
       <div class="status"><span class="dot"></span>Live</div>
     </div>
   </header>
+
   <div id="neo-bar"></div>
   <div id="sys-row">
     <div id="cpu-card"></div>

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Services — System Monitor</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <h1>&#128421; System Monitor</h1>
+      <nav class="nav">
+        <a href="/" class="nav-link">Dashboard</a>
+        <a href="/services.html" class="nav-link nav-active">Services</a>
+      </nav>
+    </div>
+    <div class="controls">
+      <label class="control-label">Refresh
+        <select id="rate-select" class="rate-select">
+          <option value="5000">5 s</option>
+          <option value="10000">10 s</option>
+          <option value="30000">30 s</option>
+        </select>
+      </label>
+      <div class="status"><span class="dot"></span>Live</div>
+    </div>
+  </header>
+  <div class="svc-toolbar">
+    <div class="proc-toggle" id="svc-filter">
+      <button class="tog tog-active" data-filter="all">All</button>
+      <button class="tog" data-filter="running">Running</button>
+      <button class="tog" data-filter="failed">Failed</button>
+      <button class="tog" data-filter="inactive">Stopped</button>
+    </div>
+    <input type="search" id="svc-search" class="svc-search" placeholder="Search services…">
+  </div>
+  <div id="svc-list" class="svc-list"><div class="svc-empty">Loading&hellip;</div></div>
+  <script src="/services.js"></script>
+</body>
+</html>
