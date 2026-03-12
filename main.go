@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -270,12 +271,20 @@ type SwapInfo struct {
 	UsedPct float64 `json:"usedPct"`
 }
 
+type LoadAvg struct {
+	One    float64 `json:"one"`
+	Five   float64 `json:"five"`
+	Fifteen float64 `json:"fifteen"`
+}
+
 type SystemInfo struct {
-	CPUPct float64   `json:"cpuPct"`
-	Cores  []float64 `json:"cores"`
-	Memory MemInfo   `json:"memory"`
-	Swap   SwapInfo  `json:"swap"`
-	Uptime string    `json:"uptime"` // e.g. "3d 14h 22m"
+	CPUPct     float64   `json:"cpuPct"`
+	Cores      []float64 `json:"cores"`
+	Memory     MemInfo   `json:"memory"`
+	Swap       SwapInfo  `json:"swap"`
+	Uptime     string    `json:"uptime"`     // e.g. "3d 14h 22m"
+	LoadAvg    LoadAvg   `json:"loadAvg"`
+	TotalProcs int       `json:"totalProcs"`
 }
 
 func getSystemInfo() (SystemInfo, error) {
@@ -317,10 +326,13 @@ func getSystemInfo() (SystemInfo, error) {
 	}
 
 	aggPct, corePcts := getCPUPcts()
+	loadAvg, totalProcs := getLoadAvg()
 	return SystemInfo{
-		CPUPct: aggPct,
-		Cores:  corePcts,
-		Uptime: getUptime(),
+		CPUPct:     aggPct,
+		Cores:      corePcts,
+		Uptime:     getUptime(),
+		LoadAvg:    loadAvg,
+		TotalProcs: totalProcs,
 		Memory: MemInfo{
 			Total:     memTotal,
 			Used:      memUsed,
@@ -346,8 +358,11 @@ type HardwareInfo struct {
 	RAMSpeed  string `json:"ramSpeed"`  // e.g. "3200 MT/s"
 	Hostname  string `json:"hostname"`  // host system hostname
 	OS        string `json:"os"`        // e.g. "Ubuntu 22.04.3 LTS"
-	Kernel    string `json:"kernel"`    // e.g. "6.6.114.1-microsoft-standard-WSL2"
-	CoreCount int    `json:"coreCount"` // number of logical CPU cores
+	OSId      string `json:"osId"`      // e.g. "ubuntu", "debian", "arch"
+	Kernel     string  `json:"kernel"`     // e.g. "6.6.114.1-microsoft-standard-WSL2"
+	CoreCount  int     `json:"coreCount"`  // number of logical CPU cores
+	Arch       string  `json:"arch"`       // e.g. "x86_64", "aarch64"
+	CPUMaxMHz  float64 `json:"cpuMaxMHz"`  // e.g. 5200.0
 }
 
 var (
@@ -494,7 +509,7 @@ func getUptime() string {
 	return fmt.Sprintf("%dm", mins)
 }
 
-func getOSName() string {
+func getOSInfo() (name, id string) {
 	for _, p := range []string{"/host/etc/os-release", "/etc/os-release"} {
 		f, err := os.Open(p)
 		if err != nil {
@@ -504,12 +519,18 @@ func getOSName() string {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.HasPrefix(line, "PRETTY_NAME=") {
-				return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)
+			if strings.HasPrefix(line, "PRETTY_NAME=") && name == "" {
+				name = strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)
+			}
+			if strings.HasPrefix(line, "ID=") && id == "" {
+				id = strings.Trim(strings.TrimPrefix(line, "ID="), `"`)
 			}
 		}
+		if name != "" {
+			return name, id
+		}
 	}
-	return "Linux"
+	return "Linux", ""
 }
 
 func getKernelVersion() string {
@@ -537,6 +558,75 @@ func getCoreCount() int {
 	return count
 }
 
+func getLoadAvg() (LoadAvg, int) {
+	data, err := os.ReadFile(procPath("loadavg"))
+	if err != nil {
+		return LoadAvg{}, 0
+	}
+	// Format: "0.52 0.34 0.28 2/456 12345"
+	fields := strings.Fields(string(data))
+	if len(fields) < 4 {
+		return LoadAvg{}, 0
+	}
+	one, _     := strconv.ParseFloat(fields[0], 64)
+	five, _    := strconv.ParseFloat(fields[1], 64)
+	fifteen, _ := strconv.ParseFloat(fields[2], 64)
+	totalProcs := 0
+	if parts := strings.SplitN(fields[3], "/", 2); len(parts) == 2 {
+		totalProcs, _ = strconv.Atoi(parts[1])
+	}
+	return LoadAvg{One: one, Five: five, Fifteen: fifteen}, totalProcs
+}
+
+// goarchToDisplay maps Go's GOARCH values to conventional display names.
+func goarchToDisplay() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x86_64"
+	case "arm64":
+		return "aarch64"
+	case "386":
+		return "i386"
+	case "arm":
+		return "armv7l"
+	default:
+		return runtime.GOARCH
+	}
+}
+
+func getCPUMaxMHz() float64 {
+	// Try sysfs cpufreq first (most accurate).
+	for _, p := range []string{
+		"/host/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
+		"/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq",
+	} {
+		if data, err := os.ReadFile(p); err == nil {
+			if khz, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64); err == nil {
+				return khz / 1000.0
+			}
+		}
+	}
+	// Fallback: read "cpu MHz" from /proc/cpuinfo.
+	f, err := os.Open(procPath("cpuinfo"))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	var maxMHz float64
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "cpu MHz") {
+			if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+				if mhz, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err == nil && mhz > maxMHz {
+					maxMHz = mhz
+				}
+			}
+		}
+	}
+	return maxMHz
+}
+
 // getHostname returns the host system's hostname. When running in a container
 // with the host root bind-mounted at /host, it reads /host/etc/hostname
 // directly to avoid returning the container's hostname.
@@ -553,14 +643,18 @@ func getHostname() string {
 func getHardwareInfo() HardwareInfo {
 	hwOnce.Do(func() {
 		ramType, ramSpeed := getRAMDetails()
+		osName, osId := getOSInfo()
 		hwCache = HardwareInfo{
 			CPUModel:  getCPUModel(),
 			RAMType:   ramType,
 			RAMSpeed:  ramSpeed,
 			Hostname:  getHostname(),
-			OS:        getOSName(),
+			OS:        osName,
+			OSId:      osId,
 			Kernel:    getKernelVersion(),
 			CoreCount: getCoreCount(),
+			Arch:      goarchToDisplay(),
+			CPUMaxMHz: getCPUMaxMHz(),
 		}
 	})
 	return hwCache
