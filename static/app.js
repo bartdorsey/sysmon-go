@@ -64,6 +64,7 @@
 
 /**
  * @typedef {Object} HardwareInfo
+ * @property {string} hostname  - Host system hostname
  * @property {string} cpuModel - e.g. "Intel(R) Core(TM) i9-13900K CPU @ 3.00GHz"
  * @property {string} ramType  - e.g. "DDR4"
  * @property {string} ramSpeed - e.g. "3200 MT/s"
@@ -87,7 +88,7 @@ const swapHistory = [];
 const netHistory = {};
 
 /** @type {HardwareInfo} Cached hardware info fetched once on load. */
-let hwInfo = { cpuModel: '', ramType: '', ramSpeed: '' };
+let hwInfo = { cpuModel: '', ramType: '', ramSpeed: '', hostname: '' };
 
 /**
  * Append a value to a history array, capping it at MAX_HISTORY entries.
@@ -524,7 +525,14 @@ if (rateSelect) {
 
 fetch('/api/hardware')
   .then((r) => r.json())
-  .then((/** @type {HardwareInfo} */ data) => { hwInfo = data; });
+  .then((/** @type {HardwareInfo} */ data) => {
+    hwInfo = data;
+    if (data.hostname) {
+      document.title = `${data.hostname} — System Monitor`;
+      const h1 = document.querySelector('header h1');
+      if (h1) h1.textContent = `🖥 ${data.hostname}`;
+    }
+  });
 
 refresh();
 applyRate(getSavedRate());

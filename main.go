@@ -342,6 +342,7 @@ type HardwareInfo struct {
 	CPUModel string `json:"cpuModel"` // e.g. "Intel(R) Core(TM) i9-13900K CPU @ 3.00GHz"
 	RAMType  string `json:"ramType"`  // e.g. "DDR4"
 	RAMSpeed string `json:"ramSpeed"` // e.g. "3200 MT/s"
+	Hostname string `json:"hostname"` // host system hostname
 }
 
 var (
@@ -462,6 +463,19 @@ func getRAMDetails() (ramType, ramSpeed string) {
 	return ramType, ramSpeed
 }
 
+// getHostname returns the host system's hostname. When running in a container
+// with the host root bind-mounted at /host, it reads /host/etc/hostname
+// directly to avoid returning the container's hostname.
+func getHostname() string {
+	if data, err := os.ReadFile("/host/etc/hostname"); err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return "unknown"
+}
+
 func getHardwareInfo() HardwareInfo {
 	hwOnce.Do(func() {
 		ramType, ramSpeed := getRAMDetails()
@@ -469,6 +483,7 @@ func getHardwareInfo() HardwareInfo {
 			CPUModel: getCPUModel(),
 			RAMType:  ramType,
 			RAMSpeed: ramSpeed,
+			Hostname: getHostname(),
 		}
 	})
 	return hwCache
