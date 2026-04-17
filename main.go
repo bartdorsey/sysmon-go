@@ -45,8 +45,8 @@ type mountEntry struct {
 	fsType     string
 }
 
-func parseMounts() ([]mountEntry, error) {
-	f, err := os.Open(procPath("mounts"))
+func parseMountsFile(path string) ([]mountEntry, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -81,14 +81,24 @@ func isVirtioFS(entry mountEntry) bool {
 }
 
 func getDiskInfo() ([]FSInfo, error) {
-	entries, err := parseMounts()
+	// /host/proc/1/mounts gives the host's true mount table: PID 1 is always
+	// in the initial mount namespace, avoiding the /proc/self symlink resolving
+	// into the container's namespace.
+	const hostMounts = "/host/proc/1/mounts"
+	inContainer := false
+	if _, err := os.Stat(hostMounts); err == nil {
+		inContainer = true
+	}
+
+	mountsFile := "/proc/mounts"
+	if inContainer {
+		mountsFile = hostMounts
+	}
+
+	entries, err := parseMountsFile(mountsFile)
 	if err != nil {
 		return nil, err
 	}
-
-	// When running in a container, procPath returns /host/proc/mounts, so
-	// mount points are host-native paths; prepend /host to reach them via statfs.
-	inContainer := strings.HasPrefix(procPath("mounts"), "/host/")
 
 	var result []FSInfo
 	seen := make(map[string]bool)
