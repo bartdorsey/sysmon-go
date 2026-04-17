@@ -15,8 +15,8 @@ go build .
 go fmt ./...
 go vet ./...
 
-# Docker
-docker-compose up --build -d
+# Podman
+podman compose up --build -d
 ```
 
 ## Architecture
