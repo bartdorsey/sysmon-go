@@ -46,7 +46,7 @@ type mountEntry struct {
 }
 
 func parseMounts() ([]mountEntry, error) {
-	f, err := os.Open("/proc/mounts")
+	f, err := os.Open(procPath("mounts"))
 	if err != nil {
 		return nil, err
 	}
@@ -86,14 +86,9 @@ func getDiskInfo() ([]FSInfo, error) {
 		return nil, err
 	}
 
-	// Detect whether the host root filesystem is bind-mounted at /host.
-	hasHostMount := false
-	for _, e := range entries {
-		if e.mountPoint == "/host" && isRealDevice(e.device) {
-			hasHostMount = true
-			break
-		}
-	}
+	// When running in a container, procPath returns /host/proc/mounts, so
+	// mount points are host-native paths; prepend /host to reach them via statfs.
+	inContainer := strings.HasPrefix(procPath("mounts"), "/host/")
 
 	var result []FSInfo
 	seen := make(map[string]bool)
@@ -103,21 +98,10 @@ func getDiskInfo() ([]FSInfo, error) {
 			continue
 		}
 
-		var displayPath, statPath string
-
-		if hasHostMount {
-			if e.mountPoint == "/host" {
-				displayPath = "/"
-				statPath = "/host"
-			} else if strings.HasPrefix(e.mountPoint, "/host/") {
-				displayPath = e.mountPoint[5:]
-				statPath = e.mountPoint
-			} else {
-				continue
-			}
-		} else {
-			displayPath = e.mountPoint
-			statPath = e.mountPoint
+		displayPath := e.mountPoint
+		statPath := e.mountPoint
+		if inContainer {
+			statPath = "/host" + e.mountPoint
 		}
 
 		if seen[displayPath] {
