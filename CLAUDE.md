@@ -19,25 +19,20 @@ go vet ./...
 docker-compose up --build -d
 ```
 
-There is no `go.mod` in the repository — it is generated at Docker build time via `go mod init sysmon`. To build locally, create one first:
-
-```bash
-go mod init sysmon
-go build .
-```
-
 ## Architecture
 
-**Single-binary HTTP service** — [main.go](main.go) (~800 lines) embeds the entire frontend via Go's `//go:embed static` directive and serves it alongside two JSON API endpoints.
+**Single-binary HTTP service** — [main.go](main.go) (~1200 lines) embeds the entire frontend via Go's `//go:embed static` directive and serves it alongside JSON API endpoints.
 
 ### API Endpoints
 
 - `GET /api/stats` — dynamic metrics: CPU (aggregate + per-core), memory/swap, disk filesystems, top-5 processes by CPU and by memory, network I/O rates
-- `GET /api/hardware` — static hardware info (CPU model, RAM type/speed); cached for 1 hour
+- `GET /api/hardware` — static hardware info (CPU model, RAM type/speed, hostname, OS, kernel, arch); cached for 1 hour via `sync.Once`
+- `GET /api/services` — systemd service list via D-Bus (`org.freedesktop.systemd1`); cached for 5 seconds
+- `GET /api/logs?unit=<name>` — last 20 journal entries for a service, fetched via `journalctl --root=/host`; unit name is validated against `[a-zA-Z0-9@._-]+`
 
 ### Metric Sources
 
-All metrics are read directly from the Linux `/proc` and `/sys` filesystems with no external dependencies. The binary detects containerized execution by checking for `/host/proc` and transparently switches paths.
+All metrics are read directly from the Linux `/proc` and `/sys` filesystems. The binary detects containerized execution by checking for `/host/proc` and transparently switches paths. The Docker volume mount is `/:/host:ro`.
 
 | Subsystem | Source |
 |-----------|--------|
@@ -47,11 +42,20 @@ All metrics are read directly from the Linux `/proc` and `/sys` filesystems with
 | Processes | `/proc/[pid]/stat`, `/proc/[pid]/status` |
 | Network I/O | `/proc/net/dev`, `/sys/class/net/[iface]/` |
 | Hardware | `/proc/cpuinfo`, `/sys/firmware/dmi/tables/DMITable` (SMBIOS Type 17) |
+| Services | D-Bus system socket (`/run/dbus/system_bus_socket` or `/host/run/dbus/`) |
 
 ### Delta Sampling
 
 CPU, process, and network metrics work by **diffing consecutive snapshots**. On startup, `main()` primes all snapshot state so the first API call returns meaningful values rather than zeros.
 
+### External Dependencies
+
+- `github.com/godbus/dbus/v5` — used only for the `/api/services` endpoint to query systemd over D-Bus
+
 ### Frontend
 
-`static/` contains a zero-dependency vanilla JS single-page app (no build step). It polls `/api/stats` at a configurable interval and renders live charts/tables. Assets are embedded into the binary at compile time.
+`static/` contains a zero-dependency vanilla JS app (no build step) with two pages:
+- `index.html` + `app.js` — dashboard polling `/api/stats` at a configurable interval with live charts/tables
+- `services.html` + `services.js` — services list with inline log viewer using `/api/services` and `/api/logs`
+
+Assets are embedded into the binary at compile time.
