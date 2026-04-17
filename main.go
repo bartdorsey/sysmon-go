@@ -76,6 +76,10 @@ func isRealDevice(device string) bool {
 	return strings.HasPrefix(device, "/dev/") || strings.Contains(device, ":")
 }
 
+func isVirtioFS(entry mountEntry) bool {
+	return entry.fsType == "virtiofs"
+}
+
 func getDiskInfo() ([]FSInfo, error) {
 	entries, err := parseMounts()
 	if err != nil {
@@ -95,7 +99,7 @@ func getDiskInfo() ([]FSInfo, error) {
 	seen := make(map[string]bool)
 
 	for _, e := range entries {
-		if !isRealDevice(e.device) {
+		if !isRealDevice(e.device) && !isVirtioFS(e) {
 			continue
 		}
 
